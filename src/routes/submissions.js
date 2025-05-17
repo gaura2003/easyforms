@@ -1,15 +1,27 @@
 const express = require('express');
-const router = express.Router();
-const subscriptionsController = require('../controllers/subscriptions');
+const router = express.Router({ mergeParams: true });
+const submissionsController = require('../controllers/submissions');
 const authMiddleware = require('../middleware/auth');
 
-// Protected routes (require authentication)
-router.post('/create', authMiddleware, subscriptionsController.createSubscription);
-router.post('/verify', authMiddleware, subscriptionsController.verifySubscription);
-router.post('/cancel', authMiddleware, subscriptionsController.cancelSubscription);
-router.get('/', authMiddleware, subscriptionsController.getSubscription);
+// All routes require authentication
+router.use(authMiddleware);
 
-// Webhook route (no authentication required)
-router.post('/webhook', subscriptionsController.handleWebhook);
+// Get all submissions for a form with pagination and filtering
+router.get('/', submissionsController.getSubmissions);
+
+// Get submission statistics
+router.get('/stats', submissionsController.getSubmissionStats);
+
+// Export submissions to CSV
+router.get('/export', submissionsController.exportSubmissions);
+
+// Get a specific submission
+router.get('/:submissionId', submissionsController.getSubmissionById);
+
+// Delete a specific submission
+router.delete('/:submissionId', submissionsController.deleteSubmission);
+
+// Delete all submissions for a form
+router.delete('/', submissionsController.deleteAllSubmissions);
 
 module.exports = router;

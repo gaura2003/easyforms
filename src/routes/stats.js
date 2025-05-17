@@ -9,4 +9,10 @@ router.use(authMiddleware);
 // Get dashboard statistics
 router.get('/', statsController.getStats);
 
+// Get detailed subscription statistics
+router.get('/subscription', statsController.getSubscriptionStats);
+
+// Get usage statistics
+router.get('/usage', statsController.getUsageStats);
+
 module.exports = router;

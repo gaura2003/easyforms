@@ -38,7 +38,13 @@ app.use('/api/forms', formRoutes);
 app.use('/api/submissions', submissionRoutes);
 app.use('/api/subscriptions', subscriptionRoutes);
 app.use('/api/users', userRoutes);
-app.use('/api/stats', statsRoutes); // Add this line
+app.use('/api/stats', statsRoutes); 
+
+app.use('/api/payment-methods', require('./routes/paymentMethods'));
+app.use('/api/payments', require('./routes/payments'));
+app.use('/api/subscription-history', require('./routes/subscriptionHistory'));
+app.use('/api/subscription-plans', require('./routes/subscriptionPlans'));
+
 
 // Public form submission endpoint
 app.post('/f/:endpointId', require('./controllers/publicSubmission'));
