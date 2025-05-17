@@ -7,10 +7,24 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_KEY_SECRET || 'uXo5UAsgnT7zglLrmsH749Je'
 });
 
+// Get all subscription plans
+exports.getSubscriptionPlans = async (req, res) => {
+  try {
+    const [plans] = await req.app.locals.db.query(
+      'SELECT * FROM subscription_plans ORDER BY monthly_price ASC'
+    );
+    
+    res.json({ plans });
+  } catch (error) {
+    console.error('Error fetching subscription plans:', error);
+    res.status(500).json({ message: 'Error fetching subscription plans' });
+  }
+};
+
 // Create a subscription
 exports.createSubscription = async (req, res) => {
   try {
-    const { planId } = req.body;
+    const { planId, interval } = req.body;
     const userId = req.user.id;
 
     // Get the plan details from your database
@@ -24,22 +38,43 @@ exports.createSubscription = async (req, res) => {
     }
 
     const plan = plans[0];
+    
+    // Set up the amount based on interval
+    const amount = interval === 'yearly' ? plan.yearly_price * 100 : plan.monthly_price * 100;
+    
+    // Create a plan in Razorpay
+    const razorpayPlan = await razorpay.plans.create({
+      period: interval === 'yearly' ? 'yearly' : 'monthly',
+      interval: 1,
+      item: {
+        name: `${plan.name.toUpperCase()} Plan (${interval})`,
+        amount: amount,
+        currency: 'INR',
+        description: `EasyForms ${plan.name} subscription (${interval})`
+      }
+    });
 
     // Create a subscription in Razorpay
     const subscription = await razorpay.subscriptions.create({
-      plan_id: plan.razorpay_plan_id,
+      plan_id: razorpayPlan.id,
       customer_notify: 1,
-      total_count: 12, // 12 months
+      total_count: interval === 'yearly' ? 1 : 12, // 1 for yearly, 12 for monthly
+      notes: {
+        plan_name: plan.name,
+        plan_id: plan.id,
+        interval: interval
+      }
     });
 
     // Return the subscription details to the client
     res.json({
       subscription,
-      key_id: process.env.RAZORPAY_KEY_ID
+      key_id: process.env.RAZORPAY_KEY_ID || 'rzp_test_E5BNM56ZxxZAwk',
+      plan: plan
     });
   } catch (error) {
     console.error('Error creating subscription:', error);
-    res.status(500).json({ message: 'Failed to create subscription' });
+    res.status(500).json({ message: 'Failed to create subscription', error: error.message });
   }
 };
 
@@ -51,7 +86,7 @@ exports.verifySubscription = async (req, res) => {
 
     // Verify the signature
     const generated_signature = crypto
-      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET || 'uXo5UAsgnT7zglLrmsH749Je')
       .update(razorpay_payment_id + '|' + razorpay_subscription_id)
       .digest('hex');
 
@@ -61,15 +96,39 @@ exports.verifySubscription = async (req, res) => {
 
     // Get subscription details from Razorpay
     const subscription = await razorpay.subscriptions.fetch(razorpay_subscription_id);
+    
+    // Get plan details
+    const [plans] = await req.app.locals.db.query(
+      'SELECT * FROM subscription_plans WHERE id = ?',
+      [plan_id]
+    );
+    
+    if (plans.length === 0) {
+      return res.status(404).json({ message: 'Plan not found' });
+    }
+    
+    const plan = plans[0];
 
     // Update user's subscription in your database
     await req.app.locals.db.query(
-      'UPDATE users SET subscription_id = ?, subscription_status = ?, plan_id = ?, subscription_start_date = NOW(), subscription_end_date = DATE_ADD(NOW(), INTERVAL 1 YEAR) WHERE id = ?',
-      [razorpay_subscription_id, subscription.status, plan_id, userId]
+      'UPDATE users SET subscription_id = ?, subscription_status = ?, subscription_tier = ?, plan_id = ?, ' +
+      'subscription_start_date = NOW(), subscription_end_date = DATE_ADD(NOW(), INTERVAL ? YEAR) WHERE id = ?',
+      [razorpay_subscription_id, subscription.status, plan.name, plan_id, subscription.total_count === 1 ? 1 : 1/12, userId]
+    );
+
+    // Get updated user data
+    const [users] = await req.app.locals.db.query(
+      'SELECT id, email, name, subscription_tier, subscription_status, ' +
+      'subscription_start_date, subscription_end_date FROM users WHERE id = ?',
+      [userId]
     );
 
     // Return success response
-    res.json({ message: 'Subscription verified successfully', subscription });
+    res.json({ 
+      message: 'Subscription verified successfully', 
+      subscription,
+      user: users[0]
+    });
   } catch (error) {
     console.error('Error verifying subscription:', error);
     res.status(500).json({ message: 'Failed to verify subscription' });
@@ -93,8 +152,13 @@ exports.cancelSubscription = async (req, res) => {
 
     const subscriptionId = users[0].subscription_id;
 
-    // Cancel subscription in Razorpay
-    await razorpay.subscriptions.cancel(subscriptionId);
+    try {
+      // Cancel subscription in Razorpay
+      await razorpay.subscriptions.cancel(subscriptionId);
+    } catch (razorpayError) {
+      console.error('Razorpay error:', razorpayError);
+      // Continue with local cancellation even if Razorpay fails
+    }
 
     // Update user's subscription status in your database
     await req.app.locals.db.query(
@@ -113,7 +177,7 @@ exports.cancelSubscription = async (req, res) => {
 exports.handleWebhook = async (req, res) => {
   try {
     const webhookSignature = req.headers['x-razorpay-signature'];
-    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
+    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || 'webhook_secret';
 
     // Verify webhook signature
     const generated_signature = crypto
@@ -149,7 +213,7 @@ exports.handleWebhook = async (req, res) => {
       const subscriptionId = event.payload.subscription.entity.id;
       
       await req.app.locals.db.query(
-        'UPDATE users SET subscription_status = "expired" WHERE subscription_id = ?',
+        'UPDATE users SET subscription_status = "halted" WHERE subscription_id = ?',
         [subscriptionId]
       );
     }
@@ -161,14 +225,16 @@ exports.handleWebhook = async (req, res) => {
   }
 };
 
+// Get user's current subscription
 exports.getSubscription = async (req, res) => {
   try {
     const userId = req.user.id;
     
     // Get user's subscription details
     const [subscriptions] = await req.app.locals.db.query(
-      `SELECT u.subscription_id, u.subscription_status, u.subscription_start_date, 
-              u.subscription_end_date, p.name as plan_name, p.monthly_price, p.yearly_price, 
+      `SELECT u.subscription_id, u.subscription_status, u.subscription_tier,
+              u.subscription_start_date, u.subscription_end_date, 
+              p.name as plan_name, p.monthly_price, p.yearly_price, 
               p.form_limit, p.submission_limit_monthly, p.custom_redirect, 
               p.file_uploads, p.priority_support
        FROM users u
@@ -187,10 +253,11 @@ exports.getSubscription = async (req, res) => {
     const formattedSubscription = {
       id: subscription.subscription_id,
       status: subscription.subscription_status,
+      tier: subscription.subscription_tier,
       startDate: subscription.subscription_start_date,
       endDate: subscription.subscription_end_date,
       plan: {
-        name: subscription.plan_name,
+        name: subscription.plan_name || subscription.subscription_tier,
         pricing: {
           monthly: subscription.monthly_price,
           yearly: subscription.yearly_price
@@ -213,4 +280,3 @@ exports.getSubscription = async (req, res) => {
     res.status(500).json({ message: 'Error retrieving subscription details' });
   }
 };
-
